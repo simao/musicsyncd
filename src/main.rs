@@ -13,9 +13,12 @@ use failure::_core::fmt::Formatter;
 pub type Connection = r2d2::PooledConnection<r2d2_sqlite::SqliteConnectionManager>;
 pub type Pool = r2d2::Pool<r2d2_sqlite::SqliteConnectionManager>;
 
+use katatsuki::{Track as KTrack};
+
+
 #[derive(Deserialize)]
-struct AlbumsQuery {
-    artist: Option<String>,
+struct FullAlbumsQuery {
+    artist: String,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -34,6 +37,12 @@ struct Album {
     name: String,
     artist: Artist,
     year: Option<i32>
+}
+
+#[derive(Serialize, Debug)]
+struct FullAlbum {
+    album: Album,
+    tracks: Vec<Track>
 }
 
 #[derive(Serialize, Debug)]
@@ -60,7 +69,6 @@ impl Display for TrackId {
 struct Track {
     id: TrackId,
     name: String,
-    album: Option<Album>,
     track_nr: Option<i32>,
     filename: String,
     #[serde(skip)]
@@ -69,27 +77,28 @@ struct Track {
 
 struct PathBlob(PathBuf);
 
-impl PathBlob {
-    // TODO: Def. do not use this
-    fn cleanup_path(mut self) -> Self {
-        if self.0.starts_with("/home/simao/MusicBeets") {
-            let path_str = self.0.to_str().expect("Invalid Path").replace("/home/simao/MusicBeets", "/home/simao/MusicPi/Music");
-            self.0 = PathBuf::from(&path_str);
-            self
-        } else {
-            self
-        }
-    }
-}
-
 impl FromSql for PathBlob {
     fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
         let path_blob = value.as_blob()?;
         let path_str = std::str::from_utf8(path_blob).map_err(|err| FromSqlError::Other(err.into()))?;
-        Ok(PathBlob(PathBuf::from(path_str)).cleanup_path())
+        Ok(PathBlob(PathBuf::from(path_str)))
     }
 }
 
+fn find_artist_full_albums(c: &Connection, base_dir: &BaseDir, artist_name: String) -> Result<Vec<FullAlbum>, Error>{
+    let mut artist_albums = find_albums(&base_dir, Some(artist_name))?;
+
+    let mut res: Vec<FullAlbum> = vec![];
+
+    for album in artist_albums.drain(0..) {
+        let tracks = find_album_tracks(&c, album.id)?;
+
+        let fa = FullAlbum { album, tracks };
+        res.push(fa)
+    }
+
+    Ok(res)
+}
 
 fn find_album_tracks(c: &Connection, album_id: i32) -> Result<Vec<Track>, Error> {
     let mut stmt = c.prepare("select artist, a.album, title, track, path, a.year from items i join albums a on i.album = a.album where a.id = ?")?;
@@ -98,21 +107,10 @@ fn find_album_tracks(c: &Connection, album_id: i32) -> Result<Vec<Track>, Error>
         let path: PathBlob = row.get("path")?;
         let filename = path.0.file_name().and_then(|s| s.to_str()).expect("Invalid track path").to_owned(); //TODO
 
-        let album =
-            Album {
-                id: album_id,
-                name: row.get("album")?,
-                artist: Artist {
-                    name: row.get("artist")?
-                },
-                year: row.get("year")?
-            };
-
         Ok(
             Track {
                 id: TrackId::new(row.get("title")?),
                 name: row.get("title")?,
-                album: Some(album),
                 track_nr: row.get("track")?,
                 path: path.0,
                 filename
@@ -146,61 +144,51 @@ fn find_album_artwork(c: &Connection, id: i32) -> Result<AlbumArtwork, Error> {
     Ok(row)
 }
 
-fn find_albums(c: &Connection, artist: Option<String>) -> Result<Vec<Album>, Error> {
-    let parse_fn = |row: &rusqlite::Row| {
-        Ok(
-            Album {
-                id: row.get(0)?,
-                name: row.get(1)?,
-                artist: Artist { name: row.get(2)? },
-                year: row.get(3)?
-            }
-        )
-    };
+fn find_albums(base_dir: &BaseDir, artist: Option<String>) -> Result<Vec<Album>, Error> {
 
-    let mut stmt;
+    // TODO: Fix unwrap, just find all albums
 
-    let rows = if let Some(a) = artist {
-        stmt = c.prepare("SELECT id, album, albumartist, year FROM albums where albumartist = ?")?;
-        stmt.query_map(params![a], parse_fn)?
-    } else {
-        stmt = c.prepare("SELECT id, album, albumartist, year FROM albums")?;
-        stmt.query_map(params![], parse_fn)?
-    };
+    let mut dir = base_dir.0.clone();
+    dir.push(PathBuf::from(artist.unwrap()));
 
-    let mut res = vec![];
+    let album_dirs = std::fs::read_dir(dir)?;
 
-    for row in rows {
-        res.push(row?);
+    let mut res: Vec<Album> = vec![];
+
+    for adir in album_dirs {
+        let apath = adir?.path();
+
+        let first_track = std::fs::read_dir(&apath)?.nth(0).unwrap()?; // TODO: Unwrap
+
+        let ktrack = KTrack::from_path(&first_track.path(), None)?; // TODO: Use None on metadata if this fails, it will fail a lot I suppose, often with unpredicatble effects because of for example "year"
+
+        let album = Album {
+            id: 0, // TODO: What
+            name: apath.file_name().unwrap().to_string_lossy().into(),
+            artist: Artist { name: ktrack.artist },
+            year: Some(ktrack.year)
+        };
+
+        res.push(album);
     }
 
     Ok(res)
 }
 
-fn find_artists(c: &Connection) -> Result<Vec<Artist>, Error> {
-    let mut stmt = c.prepare("SELECT distinct albumartist FROM albums")?;
+fn find_artists(base_dir: &BaseDir) -> Result<Vec<Artist>, Error> {
+    let paths = std::fs::read_dir(&base_dir.0)?;
 
-    let rows = stmt.query_map(params![], |row| {
-        Ok(
+    let mut res: Vec<Artist> = vec![];
+
+    for path in paths {
+        res.push({
             Artist {
-                name: row.get(0)?,
+                name: format!("{}", path?.file_name().to_string_lossy()),
             }
-        )
-    })?;
-
-    let mut res = vec![];
-
-    for row in rows {
-        res.push(row?);
+        })
     }
 
     Ok(res)
-}
-
-async fn list_albums(query: web::Query<AlbumsQuery>, pool: web::Data<Pool>) -> Result<HttpResponse, Error> {
-    let conn = pool.get()?;
-    let resp = find_albums(&conn, query.artist.clone())?;
-    Ok(HttpResponse::Ok().json(Response { values: resp }))
 }
 
 async fn get_album_artwork(path: web::Path<(i32, )>, pool: web::Data<Pool>) -> Result<NamedFile, Error> {
@@ -228,11 +216,20 @@ async fn get_album_track_audio(req: HttpRequest, path: web::Path<(i32, TrackId, 
     }
 }
 
-async fn list_artists(pool: web::Data<Pool>) -> Result<HttpResponse, Error> {
-    let c = pool.get()?;
-    let res = find_artists(&c)?;
+async fn get_artist_full_albums(query: web::Query<FullAlbumsQuery>, base_dir: web::Data<BaseDir>, pool: web::Data<Pool>) -> Result<HttpResponse, Error> {
+    let conn = pool.get()?;
+    let resp = find_artist_full_albums(&conn, &base_dir, query.artist.clone())?;
+    Ok(HttpResponse::Ok().json(Response { values: resp }))
+}
+
+
+async fn list_artists(base_dir: web::Data<BaseDir>) -> Result<HttpResponse, Error> {
+    let res = find_artists(&base_dir)?;
     Ok(HttpResponse::Ok().json(Response { values: res }))
 }
+
+#[derive(Clone, Debug)]
+struct BaseDir(PathBuf);
 
 #[actix_rt::main]
 async fn main() -> std::io::Result<()> {
@@ -241,14 +238,18 @@ async fn main() -> std::io::Result<()> {
     let manager = SqliteConnectionManager::file("library.db");
     let pool = r2d2::Pool::new(manager).expect("could not open db");
 
+    let base_dir = BaseDir(PathBuf::from("/home/simao/MusicBeets"));
+
     HttpServer::new(move || { App::new()
         .wrap(middleware::Logger::default())
         .data(pool.clone())
-        .route("/albums", web::get().to(list_albums))
+        .data(base_dir.clone())
+        .route("/full-albums", web::get().to(get_artist_full_albums))
         .route("/albums/{id}/artwork", web::get().to(get_album_artwork))
         .route("/albums/{id}/tracks", web::get().to(get_album_tracks))
         .route("/albums/{id}/tracks/{track_id}/audio", web::get().to(get_album_track_audio))
         .route("/artists", web::get().to(list_artists))
+
     }).bind("0.0.0.0:3030")
         .unwrap()
         .run()
