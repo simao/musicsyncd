@@ -13,7 +13,14 @@ impl Display for MSError {
     }
 }
 
-impl actix_web::error::ResponseError for MSError { }
+impl actix_web::error::ResponseError for MSError {
+    fn status_code(&self) -> actix_web::http::StatusCode {
+        match self.err.downcast_ref::<EntityNotFoundError>() {
+            Some(r) => r.status_code(),
+            _ => actix_web::http::StatusCode::INTERNAL_SERVER_ERROR
+        }
+    }
+}
 
 impl From<std::io::Error> for MSError {
     fn from(err: std::io::Error) -> Self {
@@ -38,3 +45,29 @@ impl From<rusqlite::Error> for MSError {
         MSError { err: anyhow::Error::from(err) }
     }
 }
+
+
+#[derive(Debug)]
+pub struct EntityNotFoundError {
+    msg: String
+}
+
+impl EntityNotFoundError {
+    pub fn new(msg: &str) -> Self {
+        Self { msg: msg.to_owned() }
+    }
+}
+
+impl Display for EntityNotFoundError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), std::fmt::Error> {
+        f.write_str(&self.msg)
+    }
+}
+
+impl actix_web::error::ResponseError for EntityNotFoundError {
+    fn status_code(&self) -> actix_web::http::StatusCode {
+        actix_web::http::StatusCode::NOT_FOUND
+    }
+}
+
+impl std::error::Error for EntityNotFoundError {}

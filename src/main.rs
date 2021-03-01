@@ -1,6 +1,7 @@
 mod error;
 mod data_type;
 mod db;
+mod config;
 
 use actix_web::{App, HttpResponse, HttpServer, middleware, web, HttpRequest};
 
@@ -9,8 +10,12 @@ use actix_files::NamedFile;
 use error::MSError;
 use data_type::*;
 use db::Pool;
+use anyhow::Context;
+use config::ConfigOpt;
+use structopt::StructOpt;
+use env_logger::Env;
 
-async fn get_album_artwork(web::Path((id,)): web::Path<(i64, )>, pool: web::Data<Pool>) -> Result<NamedFile, MSError> {
+async fn get_album_artwork(web::Path((id,)): web::Path<(AlbumId, )>, pool: web::Data<Pool>) -> Result<NamedFile, MSError> {
     let c = pool.get()?;
     let a = db::find_album_artwork(&c, id)?;
     let file = actix_files::NamedFile::open(a.path)?;
@@ -49,26 +54,7 @@ async fn list_artists(pool: web::Data<Pool>) -> Result<HttpResponse, MSError> {
 }
 
 
-use structopt::StructOpt;
-use anyhow::Context;
-
-#[derive(StructOpt, Debug)]
-#[structopt(name = "musicsyncd")]
-struct Opt {
-    /// Directory where to save music database. Defaults to using XDG_DIR for cache
-    #[structopt(short, long, parse(from_os_str))]
-    cache_dir: Option<PathBuf>,
-
-    /// Music Directory where files are organize by Artist/Album/Tracks
-    #[structopt(short, long, parse(from_os_str))]
-    music_dir: PathBuf,
-
-    /// scan music directory and find artists albums and tracks
-    #[structopt(long = "no-reload", parse(from_flag = std::ops::Not::not))]
-    reload: bool
-}
-
-fn load_user_database(opt: &Opt) -> Result<r2d2_sqlite::SqliteConnectionManager, MSError> {
+fn load_user_database(opt: &ConfigOpt) -> Result<r2d2_sqlite::SqliteConnectionManager, MSError> {
     let base_dirs = directories::BaseDirs::new().context("Could not initialize user base dirs")?;
 
     let cache_dir: PathBuf = if let Some(ref d) = opt.cache_dir {
@@ -90,9 +76,10 @@ fn load_user_database(opt: &Opt) -> Result<r2d2_sqlite::SqliteConnectionManager,
 
 #[actix_rt::main]
 async fn main() -> std::io::Result<()> {
-    pretty_env_logger::init();
+    env_logger::Builder::from_env(Env::default().default_filter_or("info")).init();
 
-    let opt = Opt::from_args();
+    let opt = ConfigOpt::from_args();
+
     log::debug!("Using options: {:#?}", opt);
 
     let manager = load_user_database(&opt).expect("Could not load user database");
@@ -101,7 +88,7 @@ async fn main() -> std::io::Result<()> {
 
     if opt.reload {
         db::clean_db(&c).expect("Could not clean db");
-        db::reload_db(&opt.music_dir, &mut c).expect("Could not reload db");
+        db::populate_db_from_path(&opt.music_dir, &mut c).expect("Could not reload db");
     }
 
     HttpServer::new(move || { App::new()
@@ -113,7 +100,7 @@ async fn main() -> std::io::Result<()> {
         .route("/artists", web::get().to(list_artists))
         .route("/artists/{id}/full-albums", web::get().to(get_artist_full_albums))
 
-    }).bind("0.0.0.0:3030")
+    }).bind(("0.0.0.0", opt.port))
         .unwrap()
         .run()
         .await

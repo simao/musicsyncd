@@ -1,23 +1,23 @@
 use serde::{Serialize, Deserialize};
 use std::path::{PathBuf};
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
 pub struct Artist {
     pub id: ArtistId,
     pub name: String
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
 pub struct ArtistId(pub i64);
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy)]
 pub struct AlbumId(pub i64);
 
-#[derive(Serialize, Deserialize, PartialEq, Debug)]
+#[derive(Serialize, Deserialize, PartialEq, Debug, Clone, Copy)]
 pub struct TrackId(pub i64);
 
 pub struct AlbumArtwork {
-    pub album_id: i64,
+    pub album_id: AlbumId,
     pub path: PathBuf
 }
 

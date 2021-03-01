@@ -2,11 +2,12 @@
 use crate::data_type::*;
 use crate::error::*;
 
+use rusqlite::OptionalExtension;
 use rusqlite::types::{FromSql, FromSqlResult, ValueRef};
 use rusqlite::types::{ToSqlOutput};
 use rusqlite::{params, ToSql};
 use rusqlite::NO_PARAMS;
-use anyhow::Error;
+use anyhow::{Error};
 use std::path::PathBuf;
 use audiotags::Tag;
 
@@ -118,9 +119,8 @@ fn extract_track_name(path: &PathBuf) -> Option<String> {
     None.into()
 }
 
-
 // TODO: Delete old entries, keep ids
-pub fn reload_db(base_dir: &PathBuf, c: &mut Connection) -> Result<(), Error> {
+pub fn populate_db_from_path(base_dir: &PathBuf, c: &mut Connection) -> Result<i64, Error> {
     log::info!("Reloading db using {}", base_dir.display());
 
     let paths = std::fs::read_dir(&base_dir)?;
@@ -142,7 +142,9 @@ pub fn reload_db(base_dir: &PathBuf, c: &mut Connection) -> Result<(), Error> {
 
         let last_id = tx.last_insert_rowid();
 
-        artist_paths.push((last_id, artist_path));
+        log::debug!("Found artist at {:?}", &artist_path);
+
+        artist_paths.push((last_id, artist_path.file_name().expect("invalid directory name").into()));
     }
 
     tx.commit()?;
@@ -203,7 +205,7 @@ pub fn reload_db(base_dir: &PathBuf, c: &mut Connection) -> Result<(), Error> {
 
     log::info!("Finished reloading db");
 
-    Ok(())
+    Ok(track_count)
 }
 
 
@@ -244,22 +246,22 @@ pub fn find_album_tracks(c: &Connection, album_id: AlbumId) -> Result<Vec<Track>
     Ok(res?)
 }
 
-
-pub fn find_album_artwork(c: &Connection, album_id: i64) -> Result<AlbumArtwork, Error> {
+pub fn find_album_artwork(c: &Connection, album_id: AlbumId) -> Result<AlbumArtwork, Error> {
     let mut stmt = c.prepare("select art_path FROM albums where id = ?")?;
 
     let row = stmt.query_row(params![album_id], |row| {
-        let path: PathBlob = row.get("art_path")?;
+        let path: Option<PathBlob> = row.get("art_path")?;
+        Ok(path)
+    }).optional()?;
 
-        Ok(
-            AlbumArtwork {
-                album_id,
-                path: path.0
-            }
-        )
-    })?;
-
-    Ok(row)
+    match row {
+        Some(Some(p)) =>
+            Ok(AlbumArtwork { album_id, path: p.0 }),
+        Some(None) =>
+            Err(EntityNotFoundError::new("Could artwork for artist").into()),
+        None =>
+            Err(EntityNotFoundError::new("Could not find artist").into())
+    }
 }
 
 fn find_albums(c: &Connection, artist_id: Option<ArtistId>) -> Result<Vec<Album>, Error> {
@@ -325,3 +327,69 @@ pub fn find_artists(c: &Connection) -> Result<Vec<Artist>, Error> {
     Ok(res)
 }
 
+#[cfg(test)]
+mod tests {
+    use r2d2_sqlite::SqliteConnectionManager;
+    use crate::db::{clean_db, populate_db_from_path, find_artists, find_album_tracks, find_albums};
+    use crate::db::Pool;
+    use anyhow::Error;
+    use std::path::PathBuf;
+
+    fn new_db() -> Result<Pool, Error> {
+        let manager = SqliteConnectionManager::memory();
+        let pool = Pool::new(manager)?;
+        let c = pool.get().unwrap();
+        clean_db(&c)?;
+
+        Ok(pool)
+    }
+
+    fn music_dir() -> PathBuf {
+        return PathBuf::from("fixtures")
+    }
+
+    extern crate proc_macro;
+
+    use proc_macro::TokenStream;
+
+    #[proc_macro_attribute]
+    pub fn some_name(input: TokenStream) -> TokenStream {
+        unimplemented!()
+    }
+
+    #[some_name]
+    fn wat() -> () {
+
+    }
+
+    #[test]
+    fn test_finds_album() -> Result<(), Error> {
+        env_logger::init();
+        let mut c = new_db()?.get()?;
+        let track_count = populate_db_from_path(&music_dir(), &mut c)?;
+
+        assert_eq!(track_count, 1);
+
+        let artists = find_artists(&c)?;
+        let artist = artists.get(0).unwrap();
+
+        assert_eq!(artist.name, "Álvaro de Campos");
+
+        let albums = find_albums(&c, Some(artist.id))?;
+        let album = albums.get(0).expect("TEST: artist has no albums");
+
+        assert_eq!(album.title, "A Tabacaria");
+        assert_eq!(album.artist, artist.to_owned());
+
+        let tracks = find_album_tracks(&c, album.id).unwrap();
+        let t = tracks.get(0).expect("TEST: album has no tracks");
+
+        assert_eq!(t.title.as_ref().unwrap(), "500 Milliseconds of Silence");
+
+        Ok(())
+    }
+
+    // TODO: Test continue flows
+    // TODO: Test import of files without tags
+
+}
