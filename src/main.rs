@@ -1,33 +1,37 @@
-use actix_web::{App, http, HttpResponse, HttpServer, middleware, web, HttpRequest};
+mod error;
+
+use actix_web::{App, HttpResponse, HttpServer, middleware, web, HttpRequest};
 
 use rusqlite::{params, ToSql};
 use r2d2_sqlite::SqliteConnectionManager;
 use serde::{Serialize, Deserialize};
 use std::path::{PathBuf};
-use failure::{Error, AsFail};
 use actix_files::NamedFile;
-use rusqlite::types::{FromSql, FromSqlResult, ValueRef, FromSqlError};
+use rusqlite::types::{FromSql, FromSqlResult, ValueRef};
 use std::fmt::Display;
-use failure::_core::fmt::Formatter;
 use rusqlite::NO_PARAMS;
+use anyhow::Error;
+use audiotags::Tag;
+use error::MyError;
+use rusqlite::types::{ToSqlOutput};
+use serde::export::Formatter;
 
 pub type Connection = r2d2::PooledConnection<r2d2_sqlite::SqliteConnectionManager>;
 pub type Pool = r2d2::Pool<r2d2_sqlite::SqliteConnectionManager>;
 
-use rusqlite::types::Type::Null;
-
-use audiotags::Tag;
-
 
 #[derive(Serialize, Deserialize, Debug)]
 struct Artist {
-    id: i64,
+    id: ArtistId,
     name: String
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+struct ArtistId(i64);
+
 struct AlbumArtwork {
     album_id: i64,
-    path: std::path::PathBuf
+    path: PathBuf
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -35,6 +39,19 @@ struct Album {
     id: i64,
     title: String,
     artist: Artist,
+}
+
+
+impl ToSql for ArtistId {
+    fn to_sql(&self) -> Result<ToSqlOutput<'_>, rusqlite::Error> {
+        Ok(ToSqlOutput::from(self.0))
+    }
+}
+
+impl FromSql for ArtistId {
+    fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
+        value.as_i64().map(ArtistId)
+    }
 }
 
 #[derive(Serialize, Debug)]
@@ -75,9 +92,7 @@ impl FromSql for PathBlob {
     }
 }
 
-use rusqlite::types::{ToSqlOutput};
-use std::ffi::OsStr;
-// use rusqlite::{OptionalExtension};
+
 
 
 impl ToSql for PathBlob {
@@ -89,7 +104,7 @@ impl ToSql for PathBlob {
     }
 }
 
-fn find_artist_full_albums(c: &Connection, artist_id: i64) -> Result<Vec<FullAlbum>, Error>{
+fn find_artist_full_albums(c: &Connection, artist_id: ArtistId) -> Result<Vec<FullAlbum>, Error>{
     let mut artist_albums = find_albums(&c, Some(artist_id))?;
 
     let mut res: Vec<FullAlbum> = vec![];
@@ -110,7 +125,7 @@ fn find_album_tracks(c: &Connection, album_id: i64) -> Result<Vec<Track>, Error>
 
     let rows = stmt.query_map(params![album_id], |row| {
         let path: PathBlob = row.get("full_path")?;
-        let filename = path.0.file_name().and_then(|s| s.to_str()).expect("Invalid track path").to_owned(); //TODO
+        let filename = path.0.file_name().expect("invalid track path").to_string_lossy().to_string();
 
         Ok(
             Track {
@@ -131,6 +146,7 @@ fn find_album_tracks(c: &Connection, album_id: i64) -> Result<Vec<Track>, Error>
     return Ok(res)
 }
 
+
 fn find_album_artwork(c: &Connection, album_id: i64) -> Result<AlbumArtwork, Error> {
     let mut stmt = c.prepare("select art_path FROM albums where id = ?")?;
 
@@ -148,25 +164,25 @@ fn find_album_artwork(c: &Connection, album_id: i64) -> Result<AlbumArtwork, Err
     Ok(row)
 }
 
-fn find_albums(c: &Connection, artist_id: Option<i64>) -> Result<Vec<Album>, Error> {
+fn find_albums(c: &Connection, artist_id: Option<ArtistId>) -> Result<Vec<Album>, Error> {
     let mut sql = "\
       SELECT at.id artist_id, at.name, al.id album_id, al.title \
       from artists at INNER JOIN albums al \
       on al.artist_id = at.id".to_owned();
 
-    let aid: i64;
+    let aid: ArtistId;
     let mut params: Vec<&dyn ToSql> = vec![];
 
     if let Some(_aid) = artist_id {
         aid = _aid;
         sql = sql + " WHERE artist_id = ?";
-        params.push(&aid);
+        params.push(&aid.0);
     }
 
     let mut stmt = c.prepare(&sql)?;
 
     let rows = stmt.query_map(params, |row: &rusqlite::Row| {
-        let artist_id: i64 = row.get("artist_id")?;
+        let artist_id: ArtistId = row.get("artist_id")?;
         let name: String = row.get("name")?;
         let album_id: i64 = row.get("album_id")?;
         let title: String = row.get("title")?;
@@ -211,46 +227,45 @@ fn find_artists(c: &Connection) -> Result<Vec<Artist>, Error> {
     Ok(res)
 }
 
-async fn get_album_artwork(path: web::Path<(i64, )>, pool: web::Data<Pool>) -> Result<NamedFile, Error> {
+
+
+async fn get_album_artwork(web::Path((id,)): web::Path<(i64, )>, pool: web::Data<Pool>) -> Result<NamedFile, MyError> {
     let c = pool.get()?;
-    let a = find_album_artwork(&c, path.0)?;
+    let a = find_album_artwork(&c, id)?;
     let file = actix_files::NamedFile::open(a.path)?;
     Ok(file)
 }
 
-async fn get_album_tracks(path: web::Path<(i64, )>, pool: web::Data<Pool>) -> Result<HttpResponse, Error> {
+async fn get_album_tracks(web::Path((id,)): web::Path<(i64, )>, pool: web::Data<Pool>) -> Result<HttpResponse, MyError> {
     let c = pool.get()?;
-    let tracks = find_album_tracks(&c, path.0)?;
+    let tracks = find_album_tracks(&c, id)?;
     Ok(HttpResponse::Ok().json(Response { values: tracks }))
 }
 
-async fn get_album_track_audio(req: HttpRequest, path: web::Path<(i64, TrackId, )>, pool: web::Data<Pool>) -> Result<HttpResponse, actix_web::Error> {
-    let c = pool.get().map_err(failure::Error::from)?;
-    let tracks = find_album_tracks(&c, path.0)?;
+async fn get_album_track_audio(req: HttpRequest, web::Path((album_id,track_id)): web::Path<(i64, TrackId, )>, pool: web::Data<Pool>) -> Result<HttpResponse, actix_web::Error> {
+    let c = pool.get().map_err(MyError::from)?;
+    let tracks = find_album_tracks(&c, album_id).map_err(MyError::from)?;
 
-    if let Some(track) = tracks.iter().find(|t| t.id == path.1) {
+    if let Some(track) = tracks.iter().find(|t| t.id == track_id) {
         let file = actix_files::NamedFile::open(&track.path)?;
         actix_files::NamedFile::open(file.path())?.into_response(&req)
     } else {
-        Ok(HttpResponse::NotFound().body(format!("Track {} for album {} not found", path.1, path.0)))
+        Ok(HttpResponse::NotFound().body(format!("Track {} for album {} not found", track_id, album_id)))
     }
 }
 
-async fn get_artist_full_albums(pool: web::Data<Pool>, path: web::Path<(i64, )>) -> Result<HttpResponse, Error> {
+async fn get_artist_full_albums(pool: web::Data<Pool>, web::Path((artist_id,)): web::Path<(ArtistId, )>) -> Result<HttpResponse, MyError> {
     let conn = pool.get()?;
-    let resp = find_artist_full_albums(&conn, path.0)?;
+    let resp = find_artist_full_albums(&conn, artist_id)?;
     Ok(HttpResponse::Ok().json(Response { values: resp }))
 }
 
 
-async fn list_artists(pool: web::Data<Pool>) -> Result<HttpResponse, Error> {
+async fn list_artists(pool: web::Data<Pool>) -> Result<HttpResponse, MyError> {
     let conn = pool.get()?;
     let res = find_artists(&conn)?;
     Ok(HttpResponse::Ok().json(Response { values: res }))
 }
-
-#[derive(Clone, Debug)]
-struct BaseDir(PathBuf);
 
 
 fn clean_db(c: &Connection) -> Result<(), Error> {
@@ -269,10 +284,10 @@ fn clean_db(c: &Connection) -> Result<(), Error> {
 }
 
 // TODO: Delete old entries, keep ids
-fn reload_db(base_dir: &BaseDir, c: &mut Connection) -> Result<(), Error> {
-    log::info!("Reloading db using {}", base_dir.0.display());
+fn reload_db(base_dir: &PathBuf, c: &mut Connection) -> Result<(), Error> {
+    log::info!("Reloading db using {}", base_dir.display());
 
-    let paths = std::fs::read_dir(&base_dir.0)?;
+    let paths = std::fs::read_dir(&base_dir)?;
 
     let mut artist_paths: Vec<(i64, PathBuf)> = vec![];
 
@@ -299,7 +314,7 @@ fn reload_db(base_dir: &BaseDir, c: &mut Connection) -> Result<(), Error> {
     let tx = c.transaction()?;
 
     for (aid, artist_path) in artist_paths {
-        let mut dir = base_dir.0.clone();
+        let mut dir = base_dir.clone();
         dir.push(artist_path);
 
         log::debug!("Opening {:?}", dir);
@@ -322,7 +337,8 @@ fn reload_db(base_dir: &BaseDir, c: &mut Connection) -> Result<(), Error> {
                 None
             };
 
-            tx.execute("INSERT INTO albums (title, artist_id, art_path) VALUES (?1, ?2, ?3)", params![name, aid, db_artwork_path])?;
+            tx.execute("INSERT INTO albums (title, artist_id, art_path) VALUES (?1, ?2, ?3)",
+                       params![name, aid, db_artwork_path])?;
 
             let album_id = tx.last_insert_rowid();
 
@@ -337,7 +353,7 @@ fn reload_db(base_dir: &BaseDir, c: &mut Connection) -> Result<(), Error> {
             for tentry in track_paths {
                 let tpath = tentry?.path();
 
-                if ! tpath.is_file() || tpath.extension().unwrap() == "jpg" {
+                if ! tpath.is_file() || tpath.extension().unwrap() == "jpg" { // TODO: more cover types
                     continue;
                 }
 
@@ -346,14 +362,13 @@ fn reload_db(base_dir: &BaseDir, c: &mut Connection) -> Result<(), Error> {
                 let t = Tag::default().read_from_path(&tpath);
 
                 match t {
-                    Ok(audio_tags) =>
+                    Ok(audio_tags) => {
                         tx.execute("INSERT INTO tracks (title, album_id, full_path) VALUES (?1, ?2, ?3)",
-                                   params![audio_tags.title(), album_id, PathBlob(tpath)])?,
-                    Err(err) => {
-                        log::debug!("Could not read metadata from {:?}: {:?}", tpath, err);
-                        0 as usize
-                    }
-
+                                   params![audio_tags.title(), album_id, PathBlob(tpath)])?;
+                        ()
+                    },
+                    Err(err) =>
+                        log::debug!("Could not read metadata from {:?}: {:?}", tpath, err)
                 };
             }
         }
@@ -375,7 +390,7 @@ async fn main() -> std::io::Result<()> {
     let manager = SqliteConnectionManager::file("library.db");
     let pool = r2d2::Pool::new(manager).expect("could not open db");
 
-    let base_dir = BaseDir(PathBuf::from("/home/simao/MusicBeets"));
+    let base_dir = PathBuf::from("/home/simao/MusicBeets");
 
     let mut c = pool.get().expect("Could not get pool connection");
 
