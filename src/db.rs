@@ -10,6 +10,9 @@ use anyhow::Error;
 use std::path::PathBuf;
 use audiotags::Tag;
 
+use regex::Regex;
+use lazy_static::lazy_static;
+
 
 pub type Connection = r2d2::PooledConnection<r2d2_sqlite::SqliteConnectionManager>;
 pub type Pool = r2d2::Pool<r2d2_sqlite::SqliteConnectionManager>;
@@ -69,7 +72,9 @@ pub fn clean_db(c: &Connection) -> Result<(), Error> {
     Ok(())
 }
 
-const ARTWORK_PATHS: [&'static str; 4] = ["cover.jpg", "cover.png", "artwork.jpg", "cover.jpeg"];
+lazy_static! {
+    static ref ARTWORK_PATHS: [&'static str; 4] = ["cover.jpg", "cover.png", "artwork.jpg", "cover.jpeg"];
+}
 
 fn is_artwork(path: &PathBuf) -> bool {
     if let Some(filename) = path.file_name() {
@@ -100,12 +105,14 @@ fn extract_track_name(path: &PathBuf) -> Option<String> {
         log::debug!("Could not read tags for {:?} with audiotags: {:?}", path, track_tags.err());
     }
 
-    let track_tags = taglib::File::new(path);
+    if let Some(filename) = path.file_stem() {
+        lazy_static! {
+          static ref FILENAME_REGEX: Regex = Regex::new(r"\d+\s+(.+)").unwrap();
+        }
 
-    if let Ok(t) = track_tags {
-        return t.tag().ok().and_then(|t| t.title())
-    } else {
-        log::debug!("Could not read tags for {:?} with taglib: {:?}", path, track_tags.err());
+        if let Some(m) = FILENAME_REGEX.captures(&filename.to_string_lossy()) {
+            return m.get(1).map(|m| m.as_str().to_owned())
+        }
     }
 
     None.into()

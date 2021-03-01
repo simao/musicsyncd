@@ -1324,7 +1324,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "64ae83441f6b67e3b7f009295618e90f03228b0f1a149f56ee8cd0f6bb5602c5"
 
 [[package]]
-name = "music-sync"
+name = "musicsyncd"
 version = "0.1.0"
 dependencies = [
  "actix-files",
@@ -1333,15 +1333,16 @@ dependencies = [
  "anyhow",
  "audiotags",
  "directories",
+ "lazy_static",
  "log",
  "pretty_env_logger",
  "r2d2",
  "r2d2_sqlite",
+ "regex",
  "rusqlite",
  "serde",
  "serde_json",
  "structopt",
- "taglib",
 ]
 
 [[package]]
@@ -1944,25 +1945,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "unicode-xid",
-]
-
-[[package]]
-name = "taglib"
-version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b89f5ef37e426deffeed459ea78a564bbe85baf6a9b023a69437655b46ad2013"
-dependencies = [
- "libc",
- "taglib-sys",
-]
-
-[[package]]
-name = "taglib-sys"
-version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9e20ea22a603f1e8ccea16694cf8e8e3a192e5d6d6bb41d6e86dcbf3680d2a4e"
-dependencies = [
- "libc",
 ]
 
 [[package]]
