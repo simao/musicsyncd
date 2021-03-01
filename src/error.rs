@@ -31,3 +31,9 @@ impl From<anyhow::Error> for MyError {
         MyError { err }
     }
 }
+
+impl From<rusqlite::Error> for MyError {
+    fn from(err: rusqlite::Error) -> MyError {
+        MyError { err: anyhow::Error::from(err) }
+    }
+}
