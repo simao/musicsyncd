@@ -64,10 +64,53 @@ pub fn clean_db(c: &Connection) -> Result<(), Error> {
       create table tracks (id integer primary key autoincrement, title text null, album_id integer not null, full_path TEXT NOT NULL);\
     ")?;
 
-    log::info!("Clean db finished");
+    log::debug!("Clean db finished");
 
     Ok(())
 }
+
+const ARTWORK_PATHS: [&'static str; 4] = ["cover.jpg", "cover.png", "artwork.jpg", "cover.jpeg"];
+
+fn is_artwork(path: &PathBuf) -> bool {
+    if let Some(filename) = path.file_name() {
+        ARTWORK_PATHS.iter().any(|f| f == &filename.to_string_lossy())
+    } else {
+        false
+    }
+}
+
+fn extract_artwork(album_dir: &PathBuf) -> Option<PathBuf> {
+    for f in ARTWORK_PATHS.iter() {
+        let artwork_path = album_dir.join(f);
+
+        if artwork_path.exists() {
+            return Some(artwork_path)
+        }
+    }
+
+    None
+}
+
+fn extract_track_name(path: &PathBuf) -> Option<String> {
+    let track_tags = Tag::default().read_from_path(path);
+
+    if let Ok(t) = track_tags {
+        return t.title().map(|v| v.to_string())
+    } else {
+        log::debug!("Could not read tags for {:?} with audiotags: {:?}", path, track_tags.err());
+    }
+
+    let track_tags = taglib::File::new(path);
+
+    if let Ok(t) = track_tags {
+        return t.tag().ok().and_then(|t| t.title())
+    } else {
+        log::debug!("Could not read tags for {:?} with taglib: {:?}", path, track_tags.err());
+    }
+
+    None.into()
+}
+
 
 // TODO: Delete old entries, keep ids
 pub fn reload_db(base_dir: &PathBuf, c: &mut Connection) -> Result<(), Error> {
@@ -87,7 +130,7 @@ pub fn reload_db(base_dir: &PathBuf, c: &mut Connection) -> Result<(), Error> {
             continue;
         }
 
-        let name = format!("{}", artist_path.file_name().unwrap().to_string_lossy()); // TODO: Unwrap
+        let name = artist_path.file_name().expect("invalid artist name").to_string_lossy();
         tx.execute("INSERT INTO artists (name) VALUES (?)", params![name])?;
 
         let last_id = tx.last_insert_rowid();
@@ -100,8 +143,7 @@ pub fn reload_db(base_dir: &PathBuf, c: &mut Connection) -> Result<(), Error> {
     let tx = c.transaction()?;
 
     for (aid, artist_path) in artist_paths {
-        let mut dir = base_dir.clone();
-        dir.push(artist_path);
+        let dir = base_dir.join(artist_path);
 
         log::debug!("Opening {:?}", dir);
 
@@ -110,58 +152,45 @@ pub fn reload_db(base_dir: &PathBuf, c: &mut Connection) -> Result<(), Error> {
             continue;
         }
 
-        let album_dirs = std::fs::read_dir(dir)?;
+        for album_direntry in std::fs::read_dir(dir)? {
+            let album_path = album_direntry?.path();
+            let album_title = album_path.file_name().expect("invalid album name").to_string_lossy();
 
-        for adir in album_dirs {
-            let apath = adir?.path();
-            let name = apath.file_name().unwrap().to_string_lossy();
-
-            let artwork_path = apath.join("cover.jpg"); // TODO: Find more extensions
-
-            if ! apath.is_dir() {
-                log::debug!("{:?} not a dir, cannot be an album, skipping", apath); // TODO: Add as Artist+Tracks Instead?
+            if ! album_path.is_dir() {
+                log::debug!("{:?} not a dir, cannot be an album, skipping", album_path);
                 continue;
             }
 
-            let db_artwork_path = if artwork_path.exists() {
-                Some(PathBlob(artwork_path))
-            } else {
-                None
-            };
+            let db_artwork_path = extract_artwork(&album_path).map(PathBlob);
 
             tx.execute("INSERT INTO albums (title, artist_id, art_path) VALUES (?1, ?2, ?3)",
-                       params![name, aid, db_artwork_path])?;
+                       params![album_title, aid, db_artwork_path])?;
 
             let album_id = tx.last_insert_rowid();
 
-            log::debug!("Searching for tracks in {:?}", apath);
+            log::debug!("Searching for tracks in {:?}", album_path);
 
-            let track_paths = std::fs::read_dir(apath)?;
+            for track_direntry in std::fs::read_dir(album_path)? {
+                let track_path = track_direntry?.path();
 
-            for tentry in track_paths {
-                let tpath = tentry?.path();
-
-                if ! tpath.is_file() || tpath.extension().unwrap_or(&std::ffi::OsString::new()) == "jpg" { // TODO: more cover types
+                if ! track_path.is_file() || is_artwork(&track_path) {
+                    log::debug!("{:?} is not a file or is artwork, skipping", &track_path);
                     continue;
                 }
 
-                log::debug!("Reading tags for {:?}", tpath);
+                let track_name = extract_track_name(&track_path);
 
-                let t = Tag::default().read_from_path(&tpath);
-
-                match t {
-                    Ok(audio_tags) => {
-                        tx.execute("INSERT INTO tracks (title, album_id, full_path) VALUES (?1, ?2, ?3)",
-                                   params![audio_tags.title(), album_id, PathBlob(tpath)])?;
-                        ()
-                    },
-                    Err(err) =>
-                        log::debug!("Could not read metadata from {:?}: {:?}", tpath, err)
-                };
+                tx.execute("INSERT INTO tracks (title, album_id, full_path) VALUES (?1, ?2, ?3)",
+                           params![track_name, album_id, PathBlob(track_path)])?;
             }
 
         }
     }
+
+    let track_count: i64 = tx.query_row("SELECT count(id) from tracks", NO_PARAMS,
+                                        |row| row.get(0) )?;
+
+    log::info!("Added {} tracks to database", track_count);
 
     tx.commit()?;
 

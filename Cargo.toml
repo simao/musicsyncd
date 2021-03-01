@@ -21,3 +21,6 @@ anyhow = "1.0"
 audiotags = "0.2"
 structopt = "0.3"
 directories = "3.0"
+taglib = "1.0"
+
+
