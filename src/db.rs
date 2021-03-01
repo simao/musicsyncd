@@ -105,7 +105,8 @@ pub fn reload_db(base_dir: &PathBuf, c: &mut Connection) -> Result<(), Error> {
 
         log::debug!("Opening {:?}", dir);
 
-        if !dir.is_dir() {
+        if ! dir.is_dir() {
+            log::debug!("{:?} not a dir, cannot be an artist, skipping", dir);
             continue;
         }
 
@@ -116,6 +117,11 @@ pub fn reload_db(base_dir: &PathBuf, c: &mut Connection) -> Result<(), Error> {
             let name = apath.file_name().unwrap().to_string_lossy();
 
             let artwork_path = apath.join("cover.jpg"); // TODO: Find more extensions
+
+            if ! apath.is_dir() {
+                log::debug!("{:?} not a dir, cannot be an album, skipping", apath); // TODO: Add as Artist+Tracks Instead?
+                continue;
+            }
 
             let db_artwork_path = if artwork_path.exists() {
                 Some(PathBlob(artwork_path))
@@ -128,10 +134,6 @@ pub fn reload_db(base_dir: &PathBuf, c: &mut Connection) -> Result<(), Error> {
 
             let album_id = tx.last_insert_rowid();
 
-            if ! apath.is_dir() {
-                continue;
-            }
-
             log::debug!("Searching for tracks in {:?}", apath);
 
             let track_paths = std::fs::read_dir(apath)?;
@@ -139,7 +141,7 @@ pub fn reload_db(base_dir: &PathBuf, c: &mut Connection) -> Result<(), Error> {
             for tentry in track_paths {
                 let tpath = tentry?.path();
 
-                if ! tpath.is_file() || tpath.extension().unwrap() == "jpg" { // TODO: more cover types
+                if ! tpath.is_file() || tpath.extension().unwrap_or(&std::ffi::OsString::new()) == "jpg" { // TODO: more cover types
                     continue;
                 }
 
@@ -169,7 +171,7 @@ pub fn reload_db(base_dir: &PathBuf, c: &mut Connection) -> Result<(), Error> {
 }
 
 
-pub fn find_artist_full_albums(c: &Connection, artist_id: ArtistId) -> Result<Vec<FullAlbum>, MyError>{
+pub fn find_artist_full_albums(c: &Connection, artist_id: ArtistId) -> Result<Vec<FullAlbum>, MSError>{
     let mut artist_albums = find_albums(&c, Some(artist_id))?;
 
     let mut res: Vec<FullAlbum> = vec![];
@@ -184,7 +186,7 @@ pub fn find_artist_full_albums(c: &Connection, artist_id: ArtistId) -> Result<Ve
     Ok(res)
 }
 
-pub fn find_album_tracks(c: &Connection, album_id: AlbumId) -> Result<Vec<Track>, MyError> {
+pub fn find_album_tracks(c: &Connection, album_id: AlbumId) -> Result<Vec<Track>, MSError> {
     let mut stmt = c.prepare(
         "select id, title, full_path from tracks where album_id = ?")?;
 
@@ -271,8 +273,8 @@ pub fn find_artists(c: &Connection) -> Result<Vec<Artist>, Error> {
     let mut stmt = c.prepare("SELECT id, name from artists")?;
 
     let rows = stmt.query_map(NO_PARAMS, |row: &rusqlite::Row| {
-        let id = row.get(0)?;
-        let name = row.get(1)?;
+        let id = row.get("id")?;
+        let name = row.get("name")?;
         Ok(Artist { id, name })
     })?;
 
